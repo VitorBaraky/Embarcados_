@@ -23,23 +23,25 @@
 
 #define ESP_INTR_FLAG_DEFAULT 0
 
-uint32_t led_state = 0;
+uint32_t led_state = 0; //variável responsável por monitorar o estado do led
 
 static QueueHandle_t gpio_evt_queue = NULL;
 
+//task da interrupção
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     uint32_t gpio_num = (uint32_t) arg;
     xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
     
 }
-
+//task do GPIO
 static void gpio_task(void* arg)
 {
     uint32_t io_num;
     for(;;) {
         if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
             printf("GPIO[%"PRIu32"] intr, val: %d\n", io_num, gpio_get_level(io_num));
+            //Lógica do acionamento do led
             switch (io_num)
             {
                 case GPIO_INPUT_IO_0:
@@ -51,6 +53,7 @@ static void gpio_task(void* arg)
                     led_state = 0; 
                 break;
                 case GPIO_INPUT_IO_2:
+                    //Avalia o estado do led através do led_state
                     if (led_state){
                         gpio_set_level(GPIO_OUTPUT_IO_0,0);
                         led_state = 0;
@@ -129,8 +132,5 @@ void app_main(void)
         vTaskDelay(1000 / portTICK_PERIOD_MS);
         ESP_LOGI(TAG,"The program is running %d ...", i);
     }
-   
-    /*printf("Restarting now.\n");
-    fflush(stdout);
-    esp_restart();*/
+
 }
