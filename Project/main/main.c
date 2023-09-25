@@ -89,6 +89,13 @@ static void gpio_task(void* arg)
     io_conf.pull_up_en = 0;
     gpio_config(&io_conf); // Configuring specific outputs
     uint32_t io_num; // IO number received by the Queue
+    // install gpio isr service
+    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+    // hook isr handler for specific gpio pin
+    gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
+    gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
+    gpio_isr_handler_add(GPIO_INPUT_IO_2, gpio_isr_handler, (void*) GPIO_INPUT_IO_2);
+    // LOOP 
     for(;;) {
         if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
             ESP_LOGI(TAG_GPIO,"GPIO[%"PRIu32"] intr, val: %d\n", io_num, gpio_get_level(io_num));
@@ -198,14 +205,8 @@ void app_main(void)
 
     // ------- GPIO -------- //
     // Creating queue
-    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t)); //criação de fila
-    xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL); //task do gpio
-    // install gpio isr service
-    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-    // hook isr handler for specific gpio pin
-    gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
-    gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
-    gpio_isr_handler_add(GPIO_INPUT_IO_2, gpio_isr_handler, (void*) GPIO_INPUT_IO_2);
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t)); 
+    xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL); 
     // ------- Timer -------- // 
     // Creating TIMER Queue and task 
     Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
@@ -221,6 +222,6 @@ void app_main(void)
     {
        i++;
       vTaskDelay(1000 / portTICK_PERIOD_MS);
-       ESP_LOGI(TAG,"The program is running %d ...", i);
+       // ESP_LOGI(TAG,"The program is running %d ...", i);
     }
 }
