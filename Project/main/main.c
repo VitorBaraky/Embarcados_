@@ -1,6 +1,6 @@
 // Project - Embedded systems - ESP32
 // Group : Vitor Baraky and Victor Hugo
-// Library
+// ---------------------------------------- Library -------------------------------------------- //
 #include <stdio.h>
 #include <inttypes.h>
 #include "sdkconfig.h"
@@ -12,11 +12,11 @@
 #include "driver/gpio.h"
 #include "freertos/queue.h"
 #include "driver/gptimer.h"
-// Defining Global TAGs
+// ----------------------------------------  Defining Global TAGs -------------------------------------------- //
  static const char* TAG = "ESP_32";
  static const char* TAG_GPIO = "GPIO";
  static const char* TAG_TIMER = "TIMER";
-// Defining global variables
+// ----------------------------------------  Defining global variables and struct ---------------------------- //
 // Inputs
 #define GPIO_INPUT_IO_0    21
 #define GPIO_INPUT_IO_1    22
@@ -28,19 +28,66 @@
 #define ESP_INTR_FLAG_DEFAULT 0
 // LED STATE variable
 uint32_t led_state = 0; // variable responsable to register the LED state
-
-//////////////////////////////////////////// - GPIO - //////////////////////////////////////////////////
-// define event queue
+// Defining event count struct
+typedef struct {
+    uint64_t event_count;
+    uint64_t a_count;      
+} queue_element_t;
+int conta = 0;
+// Defining real time clock struct
+typedef struct 
+{
+    uint8_t segundo;
+    uint8_t minuto;
+    uint8_t hora;
+} horario;
+horario relogio; 
+// ---------------------------------------- Starting QUEUEs -------------------------------------------- //
+// Starting GPIO Queue
 static QueueHandle_t gpio_evt_queue = NULL;
-// GPIO Interruption tasks
+// Starting Timer Queue
+static QueueHandle_t Timer_evt_queue = NULL;
+// ----------------------------------------  Interruptions -------------------------------------------- //
+// GPIO interruption 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     uint32_t gpio_num = (uint32_t) arg;
     xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);  
 }
-// GPIO task
+// TIMER interruption 
+static bool IRAM_ATTR alarm_v1(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_data){
+
+    BaseType_t high_task_awoken = pdFALSE;
+    // Retrieve count value and send to queue
+    queue_element_t timer_element = {
+        .event_count = edata->count_value,
+        .a_count = edata->alarm_value
+    };
+    xQueueSendFromISR(Timer_evt_queue, &timer_element, NULL);
+    gptimer_alarm_config_t alarm_config = {
+        .alarm_count = edata->alarm_value + 100000, // alarm in next 100ms
+    };
+    gptimer_set_alarm_action(timer, &alarm_config);
+    return (high_task_awoken == pdTRUE);
+}
+// ----------------------------------------  TASKS -------------------------------------------- //
+// GPIO task //
 static void gpio_task(void* arg)
 {
+	// Input Config
+    gpio_config_t io_conf = {};
+    io_conf.intr_type = GPIO_INTR_NEGEDGE;
+    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = 1;
+    gpio_config(&io_conf); // Configuring specific inputs 
+    // Output Config
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    gpio_config(&io_conf); // Configuring specific outputs
     uint32_t io_num; // IO number received by the Queue
     for(;;) {
         if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
@@ -73,44 +120,58 @@ static void gpio_task(void* arg)
         }
     }
 }
-
-//////////////////////////////////////////// - TIMER - //////////////////////////////////////////////////
-// Defining event count struct
-typedef struct {
-    uint64_t event_count;
-} queue_element_t;
-// Starting Timer Queue
-static QueueHandle_t Timer_evt_queue = NULL;
-// Timer Interruption task
-static bool IRAM_ATTR alarm_v1(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_data){
-    BaseType_t high_task_awoken = pdFALSE;
-    // Retrieve count value and send to queue
-    queue_element_t timer_element = {
-        .event_count = edata->count_value
-    };
-    xQueueSendFromISR(Timer_evt_queue, &timer_element, NULL);
-    gptimer_alarm_config_t alarm_config = {
-        .alarm_count = edata->alarm_value + 100000, // alarm in next 100ms
-    };
-    return (high_task_awoken == pdTRUE);
-}
-// Time task
+// TIMER task //
 static void task_Timer(void* arg){
     queue_element_t timer_element;
+    gptimer_handle_t gptimer = NULL;
+    gptimer_config_t timer_config = {
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+        .direction = GPTIMER_COUNT_UP,
+        .resolution_hz = 1000000, // 1MHz, 1 tick=1us
+    };
+    ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
+
+    gptimer_event_callbacks_t call_Back = {
+        .on_alarm = alarm_v1,
+    };
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &call_Back, NULL));
+    ESP_ERROR_CHECK(gptimer_enable(gptimer));
+    ESP_LOGI(TAG, "Start timer, update alarm value dynamically");
+    gptimer_alarm_config_t alarm_config1 = {
+        .alarm_count = 100000, // period = 100ms
+    };
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config1));
+    ESP_ERROR_CHECK(gptimer_start(gptimer));
     for(;;){
      if (xQueueReceive(Timer_evt_queue, &timer_element, portMAX_DELAY)) {
-          ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu", timer_element.event_count);
+          conta++;
+          if(conta == 10){
+            relogio.segundo++;
+            if (relogio.segundo == 60)
+            {
+                relogio.minuto++;
+                relogio.segundo = 0;
+                if(relogio.minuto == 60){
+                    relogio.hora++;
+                    relogio.minuto = 0;
+                    if(relogio.hora == 24){
+                        relogio.hora = 0;
+                    }
+                }
+            }
+            conta = 0;
+            ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu , a_count=%llu, hora= %u, minuto= %u, segundo= %u", timer_element.event_count, timer_element.a_count, relogio.hora,relogio.minuto,relogio.segundo);
+          }
         } 
      else {
         ESP_LOGW(TAG_TIMER, "Missed one count event");
         }
     }
 }
-
-//////////////////////////////////////////// - Main Task - //////////////////////////////////////////////////// 
+// Main Task //
 void app_main(void)
 {
-    // ---------------------------------------- Prática 1 Chip info -------------------------------------------- //
+    // ------- CHIP INFO -------- //
     // Set variables
     esp_chip_info_t chip_info;
     uint32_t flash_size;
@@ -135,21 +196,7 @@ void app_main(void)
 
     ESP_LOGI(TAG,"Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
 
-    // ---------------------------------------- Prática 2 GPIO -------------------------------------------- // 
-    // Input Config
-    gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;
-    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pull_up_en = 1;
-    gpio_config(&io_conf); // Configuring specific inputs 
-    // Output Config
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
-    io_conf.pull_down_en = 0;
-    io_conf.pull_up_en = 0;
-    gpio_config(&io_conf); // Configuring specific outputs
+    // ------- GPIO -------- //
     // Creating queue
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t)); //criação de fila
     xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL); //task do gpio
@@ -159,37 +206,16 @@ void app_main(void)
     gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
     gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
     gpio_isr_handler_add(GPIO_INPUT_IO_2, gpio_isr_handler, (void*) GPIO_INPUT_IO_2);
-
-    // ---------------------------------------- Prática 3 Timer  -------------------------------------------- // 
+    // ------- Timer -------- // 
     // Creating TIMER Queue and task 
-    xTaskCreate(task_Timer, "Timer_task", 2048, NULL, 10, NULL); 
     Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
+    xTaskCreate(task_Timer, "Timer_task", 2048, NULL, 10, NULL); 
     if (!Timer_evt_queue) {        
         ESP_LOGE(TAG_TIMER, "Creating queue failed");
         return;
     }
     ESP_LOGI(TAG_TIMER, "Create timer handle");
-    gptimer_handle_t gptimer = NULL;
-    gptimer_config_t timer_config = {
-        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
-        .direction = GPTIMER_COUNT_UP,
-        .resolution_hz = 1000000, // 1MHz, 1 tick=1us
-    };
-    ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
-
-    gptimer_event_callbacks_t call_Back = {
-        .on_alarm = alarm_v1,
-    };
-    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &call_Back, NULL));
-    ESP_ERROR_CHECK(gptimer_enable(gptimer));
-    ESP_LOGI(TAG, "Start timer, update alarm value dynamically");
-    gptimer_alarm_config_t alarm_config1 = {
-        .alarm_count = 100000, // period = 100ms
-    };
-    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config1));
-    ESP_ERROR_CHECK(gptimer_start(gptimer));
-
-    // ---------------------------------------- Block loop  -------------------------------------------- // // 
+    // ------- Block loop -------- //
     int i = 0;
     while(1)
     {
