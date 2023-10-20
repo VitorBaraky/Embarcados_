@@ -16,11 +16,16 @@
 #include "esp_err.h"
 #include <math.h>
 #include <freertos/semphr.h>
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "soc/soc_caps.h"
 // ----------------------------------------  Defining Global TAGs -------------------------------------------- //
 static const char *TAG = "ESP_32";
 static const char *TAG_GPIO = "GPIO";
 static const char *TAG_TIMER = "TIMER";
 static const char *TAG_PWM = "PWM";
+static const char *TAG_ADC = "ADC";
 // ----------------------------------------  Defining global variables and struct ---------------------------- //
 // Inputs
 #define GPIO_INPUT_IO_0 21
@@ -48,27 +53,37 @@ typedef struct
     uint8_t hora;
 } horario;
 horario relogio;
-typedef struct 
+typedef struct
 {
-    bool mode; // Validate pwm mode (Automatic or Manual)
+    bool mode;           // Validate pwm mode (Automatic or Manual)
     uint32_t duty_count; // Raw duty count
 } pwm_modes;
+typedef struct
+{
+    uint32_t raw;     // Raw value
+    uint32_t voltage; // Calib voltage
+} adc_type;
 // PWM Global defines
 #define LEDC_TIMER LEDC_TIMER_0
 #define LEDC_MODE LEDC_LOW_SPEED_MODE
-#define LEDC_CHANNEL_0 LEDC_CHANNEL_0 // PWM CHANNEL 0
-#define LEDC_CHANNEL_1 LEDC_CHANNEL_1 // PWM CHANNEL 1
+#define LEDC_CHANNEL_0 LEDC_CHANNEL_0   // PWM CHANNEL 0
+#define LEDC_CHANNEL_1 LEDC_CHANNEL_1   // PWM CHANNEL 1
 #define LEDC_DUTY_RES LEDC_TIMER_13_BIT // PWM resolution
-#define LEDC_FREQUENCY (5000) // PWM frequency          
+#define LEDC_FREQUENCY (5000)           // PWM frequency
+// ADC Global defines
+#define ADC1_CHAN0 ADC_CHANNEL_3
 // ---------------------------------------- Starting SEMAPHOREs -------------------------------------------- //
 static SemaphoreHandle_t semaphore_pwm = NULL;
+static SemaphoreHandle_t semaphore_ADC = NULL;
 // ---------------------------------------- Starting QUEUEs -------------------------------------------- //
 // Starting GPIO Queue
 static QueueHandle_t gpio_evt_queue = NULL;
 // Starting Timer Queue
 static QueueHandle_t Timer_evt_queue = NULL;
-// Starting GPIO-PWM Queue 
+// Starting GPIO-PWM Queue
 static QueueHandle_t gpio_pwm_queue = NULL;
+// Starting ADC-TIMER Queue
+static QueueHandle_t adc_timer_queue = NULL;
 // ----------------------------------------  Interruptions -------------------------------------------- //
 // GPIO interruption
 static void IRAM_ATTR gpio_isr_handler(void *arg)
@@ -126,7 +141,7 @@ static void gpio_task(void *arg)
         // Unlock semaphor
         xSemaphoreTake(semaphore_pwm, portMAX_DELAY);
         // Receive GPIO number from Queue
-        if (xQueueReceive(gpio_evt_queue, &io_num, 10/(portTICK_PERIOD_MS)))
+        if (xQueueReceive(gpio_evt_queue, &io_num, 10 / (portTICK_PERIOD_MS)))
         {
             ESP_LOGI(TAG_GPIO, "GPIO[%" PRIu32 "] intr, val: %d\n", io_num, gpio_get_level(io_num));
             switch (io_num)
@@ -139,7 +154,7 @@ static void gpio_task(void *arg)
                 button_pwm.duty_count = 0;
                 break;
             // Manual PWM mode - PIN 22
-            case GPIO_INPUT_IO_1://22 manual
+            case GPIO_INPUT_IO_1: // 22 manual
                 gpio_set_level(GPIO_OUTPUT_IO_0, 0);
                 button_pwm.duty_count = 0;
                 led_state = 0;
@@ -147,11 +162,14 @@ static void gpio_task(void *arg)
                 break;
             // Manual Incrementation - PIN 23
             case GPIO_INPUT_IO_2:
-                if(button_pwm.mode == 1){
-                    if(button_pwm.duty_count == 100){
+                if (button_pwm.mode == 1)
+                {
+                    if (button_pwm.duty_count == 100)
+                    {
                         button_pwm.duty_count = 0;
                     }
-                    else{
+                    else
+                    {
                         button_pwm.duty_count += 10;
                     }
                 }
@@ -172,8 +190,7 @@ static void gpio_task(void *arg)
             }
         }
         // Send PWM Counter/Mode to queue
-        xQueueSendToBack(gpio_pwm_queue,&button_pwm,NULL);
-
+        xQueueSendToBack(gpio_pwm_queue, &button_pwm, NULL);
     }
 }
 // TIMER task //
@@ -181,6 +198,7 @@ static void timer_task(void *arg)
 {
     // Timer configuration
     queue_element_t timer_element;
+    adc_type adc1;
     gptimer_handle_t gptimer = NULL;
     gptimer_config_t timer_config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
@@ -200,7 +218,7 @@ static void timer_task(void *arg)
     };
     ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config1));
     ESP_ERROR_CHECK(gptimer_start(gptimer));
-    // Clock Loop + Semaphor sync 
+    // Clock Loop + Semaphor sync
     for (;;)
     {
         // Receive Timer counter
@@ -224,16 +242,23 @@ static void timer_task(void *arg)
                         }
                     }
                 }
-                conta = 0;
-                ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu , a_count=%llu, hora= %u, minuto= %u, segundo= %u", timer_element.event_count, timer_element.a_count, relogio.hora, relogio.minuto, relogio.segundo);
+            conta = 0;
+            ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu , a_count=%llu, hora= %u, minuto= %u, segundo= %u", timer_element.event_count, timer_element.a_count, relogio.hora, relogio.minuto, relogio.segundo);
+            while (xQueueReceive(adc_timer_queue, &adc1,10 / (portTICK_PERIOD_MS))){
+            ESP_LOGI(TAG_ADC,"ADC read --> Raw = %lu | Voltage = %lu ",adc1.raw,adc1.voltage);
+            }
+            //if(xQueueReceive(adc_timer_queue, &adc1,10 / (portTICK_PERIOD_MS)))
+                //ESP_LOGI(TAG_ADC,"ADC read --> Raw = %lu | Voltage = %lu ",adc1.raw,adc1.voltage);
             }
             // Update semaphor state
             xSemaphoreGive(semaphore_pwm);
+            xSemaphoreGive(semaphore_ADC);
         }
         else
         {
             ESP_LOGW(TAG_TIMER, "Missed one count event");
         }
+        
     }
 }
 // PWM task
@@ -273,12 +298,14 @@ static void pwm_task(void *arg)
     // PWM modes
     for (;;)
     {
-        //manual
-        if (xQueueReceive(gpio_pwm_queue, &button_pwm, portMAX_DELAY)){
-            if(button_pwm.mode == 1){
-                ESP_LOGI(TAG_PWM,"Manual mode");
-                new_duty = (pow(2,13) - 1) *button_pwm.duty_count/100;
-                ESP_LOGI(TAG_PWM,"New Manual Duty %u",new_duty);
+        // manual
+        if (xQueueReceive(gpio_pwm_queue, &button_pwm, portMAX_DELAY))
+        {
+            if (button_pwm.mode == 1)
+            {
+                ESP_LOGI(TAG_PWM, "Manual mode");
+                new_duty = (pow(2, 13) - 1) * button_pwm.duty_count / 100;
+                ESP_LOGI(TAG_PWM, "New Manual Duty %u", new_duty);
                 ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_0, new_duty));
                 // Update duty to apply the new value
                 ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_0));
@@ -286,13 +313,14 @@ static void pwm_task(void *arg)
                 // Update duty to apply the new value
                 ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_1));
             }
-        // Automatic
-            if(button_pwm.mode == 0){
-                ESP_LOGI(TAG_PWM,"Automatic mode");
+            // Automatic
+            if (button_pwm.mode == 0)
+            {
+                ESP_LOGI(TAG_PWM, "Automatic mode");
                 duty_local += 10;
-                new_duty = (pow(2,13) - 1) *duty_local/100;
-                ESP_LOGI(TAG_PWM,"New automatic Duty %u",new_duty);
-                if(duty_local == 100)
+                new_duty = (pow(2, 13) - 1) * duty_local / 100;
+                ESP_LOGI(TAG_PWM, "New automatic Duty %u", new_duty);
+                if (duty_local == 100)
                     duty_local = 0;
                 ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_0, new_duty));
                 // Update duty to apply the new value
@@ -303,60 +331,99 @@ static void pwm_task(void *arg)
             }
         }
     }
-    }
-    // Main Task //
-    void app_main(void)
+}
+// ADC Task
+static void ADC_task(void *arg)
+{
+    adc_type adc1;
+        //-------------ADC1 Init---------------//
+    adc_oneshot_unit_handle_t adc1_handle;
+    adc_cali_handle_t adc1_cali_handle = NULL;
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+    };
+    adc_oneshot_new_unit(&init_config1, &adc1_handle);
+    //-------------ADC1 Config---------------//
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_12, // 12bit max resolution
+        .atten = ADC_ATTEN_DB_11     // Allows a greater measurement range
+    };
+    adc_oneshot_config_channel(adc1_handle, ADC1_CHAN0, &config);
+    //-------------ADC1 Calibration Init---------------//
+    adc_cali_line_fitting_config_t cali_config = {
+        .unit_id = ADC_UNIT_1,
+        .atten = ADC_ATTEN_DB_11,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    adc_cali_create_scheme_line_fitting(&cali_config, &adc1_cali_handle);
+    // Reading loop
+    for (;;)
     {
-        // ------- CHIP INFO -------- //
-        // Set variables
-        esp_chip_info_t chip_info;
-        uint32_t flash_size;
-        esp_chip_info(&chip_info);
-        esp_log_level_set("ESP_32", ESP_LOG_INFO);
-        // Print LOG
-        ESP_LOGI(TAG, "This is %s chip model %u with %d CPU core(s) WiFi%s%s%s, ",
-                 CONFIG_IDF_TARGET, chip_info.model, chip_info.cores,
-                 (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
-                 (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "",
-                 (chip_info.features & CHIP_FEATURE_IEEE802154) ? ", 802.15.4 (Zigbee/Thread)" : "");
-
-        unsigned major_rev = chip_info.revision / 100;
-        unsigned minor_rev = chip_info.revision % 100;
-        ESP_LOGI(TAG, "silicon revision v%d.%d, ", major_rev, minor_rev);
-        if (esp_flash_get_size(NULL, &flash_size) != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Get flash size failed");
-            return;
-        }
-        ESP_LOGI(TAG, "%" PRIu32 "MB %s flash\n", flash_size / (uint32_t)(1024 * 1024),
-                 (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
-        ESP_LOGI(TAG, "Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
-
-        // ------- GPIO -------- //
-        // Creating queue
-        gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-        gpio_pwm_queue = xQueueCreate(10, sizeof(pwm_modes));
-        semaphore_pwm = xSemaphoreCreateBinary();
-        xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
-        // ------- Timer -------- //
-        // Creating TIMER Queue and task
-        Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
-        if (!Timer_evt_queue)
-        {
-            ESP_LOGE(TAG_TIMER, "Creating queue failed");
-            return;
-        }
-        ESP_LOGI(TAG_TIMER, "Create timer handle");
-        xTaskCreate(timer_task, "Timer_task", 2048, NULL, 10, NULL);
-        // ------- PWM -------- //
-        xTaskCreate(pwm_task, "pwm_task", 2048, NULL, 10, NULL);
-        // ------- Block loop -------- //
-        int i = 0;
-        while (1)
-        {
-            i++;
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            // ESP_LOGI(TAG,"The program is running %d ...", i);
-        }
+        // Unlock semaphor
+        xSemaphoreTake(semaphore_ADC, portMAX_DELAY);
+        adc_oneshot_read(adc1_handle, ADC1_CHAN0, &adc1.raw);
+        adc_cali_raw_to_voltage(adc1_cali_handle, adc1.raw, &adc1.voltage);
+        xQueueSendToBack(adc_timer_queue, &adc1, NULL);
     }
+}
+// Main Task
+void app_main(void)
+{
+    // ------- CHIP INFO -------- //
+    // Set variables
+    esp_chip_info_t chip_info;
+    uint32_t flash_size;
+    esp_chip_info(&chip_info);
+    esp_log_level_set("ESP_32", ESP_LOG_INFO);
+    // Print LOG
+    ESP_LOGI(TAG, "This is %s chip model %u with %d CPU core(s) WiFi%s%s%s, ",
+             CONFIG_IDF_TARGET, chip_info.model, chip_info.cores,
+             (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
+             (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "",
+             (chip_info.features & CHIP_FEATURE_IEEE802154) ? ", 802.15.4 (Zigbee/Thread)" : "");
+
+    unsigned major_rev = chip_info.revision / 100;
+    unsigned minor_rev = chip_info.revision % 100;
+    ESP_LOGI(TAG, "silicon revision v%d.%d, ", major_rev, minor_rev);
+    if (esp_flash_get_size(NULL, &flash_size) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Get flash size failed");
+        return;
+    }
+    ESP_LOGI(TAG, "%" PRIu32 "MB %s flash\n", flash_size / (uint32_t)(1024 * 1024),
+             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
+
+    ESP_LOGI(TAG, "Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
+
+    // ------- GPIO -------- //
+    // Creating queue
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    gpio_pwm_queue = xQueueCreate(10, sizeof(pwm_modes));
+    semaphore_pwm = xSemaphoreCreateBinary();
+    semaphore_ADC = xSemaphoreCreateBinary();
+    xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
+    // ------- Timer -------- //
+    // Creating TIMER Queue and task
+    adc_timer_queue = xQueueCreate(10, sizeof(adc_type)); // ADC queue
+    Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
+    if (!Timer_evt_queue)
+    {
+        ESP_LOGE(TAG_TIMER, "Creating queue failed");
+        return;
+    }
+    ESP_LOGI(TAG_TIMER, "Create timer handle");
+    xTaskCreate(timer_task, "Timer_task", 2048, NULL, 10, NULL);
+    // ------- PWM -------- //
+    xTaskCreate(pwm_task, "pwm_task", 2048, NULL, 10, NULL);
+    // ------- ADC -------- //
+   
+    xTaskCreate(ADC_task, "ADC_task", 2048, NULL, 10, NULL);
+    // ------- Block loop -------- //
+    int i = 0;
+    while (1)
+    {
+        i++;
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        // ESP_LOGI(TAG,"The program is running %d ...", i);
+    }
+}
