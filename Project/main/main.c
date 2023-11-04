@@ -20,14 +20,17 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "soc/soc_caps.h"
+#include "driver/uart.h"
+#include "string.h"
 // ----------------------------------------  Defining Global TAGs -------------------------------------------- //
 static const char *TAG = "ESP_32";
 static const char *TAG_GPIO = "GPIO";
 static const char *TAG_TIMER = "TIMER";
 static const char *TAG_PWM = "PWM";
 static const char *TAG_ADC = "ADC";
-// ----------------------------------------  Defining global variables and struct ---------------------------- //
-// Inputs
+static const char *TAG_UART = "UART";
+//  ----------------------------------------  Defining global variables and struct ---------------------------- //
+//  Inputs
 #define GPIO_INPUT_IO_0 21
 #define GPIO_INPUT_IO_1 22
 #define GPIO_INPUT_IO_2 23
@@ -72,6 +75,10 @@ typedef struct
 #define LEDC_FREQUENCY (5000)           // PWM frequency
 // ADC Global defines
 #define ADC1_CHAN0 ADC_CHANNEL_3
+// UART Global variables
+static const int RX_BUF_SIZE = 1024;
+#define TXD_PIN (GPIO_NUM_5)
+#define RXD_PIN (GPIO_NUM_4)
 // ---------------------------------------- Starting SEMAPHOREs -------------------------------------------- //
 static SemaphoreHandle_t semaphore_pwm = NULL;
 static SemaphoreHandle_t semaphore_ADC = NULL;
@@ -84,6 +91,8 @@ static QueueHandle_t Timer_evt_queue = NULL;
 static QueueHandle_t gpio_pwm_queue = NULL;
 // Starting ADC-TIMER Queue
 static QueueHandle_t adc_timer_queue = NULL;
+// Starting UART-TIMER Queue
+static QueueHandle_t uart_timer_queue = NULL;
 // ----------------------------------------  Interruptions -------------------------------------------- //
 // GPIO interruption
 static void IRAM_ATTR gpio_isr_handler(void *arg)
@@ -106,10 +115,21 @@ static bool IRAM_ATTR alarm_v1(gptimer_handle_t timer, const gptimer_alarm_event
     gptimer_set_alarm_action(timer, &alarm_config);
     return (high_task_awoken == pdTRUE);
 }
+// ----------------------------------------  Functions -------------------------------------------- //
+// Send Uart data function
+int sendData(const char *logName, const char *data)
+{
+    const int len = strlen(data);
+    const int txBytes = uart_write_bytes(UART_NUM_1, data, len);
+    ESP_LOGI(logName, "Wrote %d bytes", txBytes);
+    return txBytes;
+}
 // ----------------------------------------  TASKS -------------------------------------------- //
 // GPIO task //
 static void gpio_task(void *arg)
 {
+    // Set Log level
+    esp_log_level_set(TAG_GPIO, ESP_LOG_NONE);
     // Input Config
     gpio_config_t io_conf = {};
     io_conf.intr_type = GPIO_INTR_NEGEDGE;
@@ -196,9 +216,12 @@ static void gpio_task(void *arg)
 // TIMER task //
 static void timer_task(void *arg)
 {
+    // Set log Level
+    esp_log_level_set(TAG_TIMER, ESP_LOG_INFO);
     // Timer configuration
     queue_element_t timer_element;
     adc_type adc1;
+    horario relogioRTC;
     gptimer_handle_t gptimer = NULL;
     gptimer_config_t timer_config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
@@ -242,13 +265,22 @@ static void timer_task(void *arg)
                         }
                     }
                 }
-            conta = 0;
-            ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu , a_count=%llu, hora= %u, minuto= %u, segundo= %u", timer_element.event_count, timer_element.a_count, relogio.hora, relogio.minuto, relogio.segundo);
-            while (xQueueReceive(adc_timer_queue, &adc1,10 / (portTICK_PERIOD_MS))){
-            ESP_LOGI(TAG_ADC,"ADC read --> Raw = %lu | Voltage = %lu ",adc1.raw,adc1.voltage);
-            }
-            //if(xQueueReceive(adc_timer_queue, &adc1,10 / (portTICK_PERIOD_MS)))
-                //ESP_LOGI(TAG_ADC,"ADC read --> Raw = %lu | Voltage = %lu ",adc1.raw,adc1.voltage);
+                conta = 0;
+                ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu , a_count=%llu, hora= %u, minuto= %u, segundo= %u", timer_element.event_count, timer_element.a_count, relogio.hora, relogio.minuto, relogio.segundo);
+                while (xQueueReceive(adc_timer_queue, &adc1, 10 / (portTICK_PERIOD_MS)))
+                {
+                    ESP_LOGI(TAG_ADC, "ADC read --> Raw = %lu | Voltage = %lu ", adc1.raw, adc1.voltage);
+                }
+                if (xQueueReceive(uart_timer_queue, &relogioRTC, 10 / (portTICK_PERIOD_MS)))
+                {
+                    conta = 0;
+                    relogio.hora = relogioRTC.hora;
+                    relogio.minuto = relogioRTC.minuto;
+                    relogio.segundo = relogioRTC.segundo;
+                    relogioRTC.hora = 0;
+                    relogioRTC.minuto = 0;
+                    relogioRTC.segundo = 0;
+                }
             }
             // Update semaphor state
             xSemaphoreGive(semaphore_pwm);
@@ -258,12 +290,13 @@ static void timer_task(void *arg)
         {
             ESP_LOGW(TAG_TIMER, "Missed one count event");
         }
-        
     }
 }
 // PWM task
 static void pwm_task(void *arg)
 {
+    // Set log level
+    esp_log_level_set(TAG_PWM, ESP_LOG_NONE);
     pwm_modes button_pwm;
     int new_duty = 0;
     int duty_local = 0;
@@ -335,8 +368,10 @@ static void pwm_task(void *arg)
 // ADC Task
 static void ADC_task(void *arg)
 {
+    // Set Log level
+    esp_log_level_set(TAG_ADC, ESP_LOG_NONE);
     adc_type adc1;
-        //-------------ADC1 Init---------------//
+    //-------------ADC1 Init---------------//
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t adc1_cali_handle = NULL;
     adc_oneshot_unit_init_cfg_t init_config1 = {
@@ -366,15 +401,52 @@ static void ADC_task(void *arg)
         xQueueSendToBack(adc_timer_queue, &adc1, NULL);
     }
 }
+// UART task
+static void uart_task(void *arg)
+{
+    // Set log level
+    esp_log_level_set(TAG_UART, ESP_LOG_INFO);
+    horario relogioRTC;
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART_NUM_1, &uart_config);
+    uart_set_pin(UART_NUM_1, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    // RX data receive loop
+    static const char *TAG_UART = "RX_UART";
+    uint8_t *data = (uint8_t *)malloc(RX_BUF_SIZE + 1);
+    while (1)
+    {
+        const int rxBytes = uart_read_bytes(UART_NUM_1, data, RX_BUF_SIZE, 1000 / portTICK_PERIOD_MS);
+        if (rxBytes > 0)
+        {
+            data[rxBytes] = 0;
+            relogioRTC.hora = (data[0] - '0') * 10 + (data[1] - '0');
+            relogioRTC.minuto = (data[2] - '0') * 10 + (data[3] - '0');
+            relogioRTC.segundo = (data[4] - '0') * 10 + (data[5] - '0');
+            xQueueSendToBack(uart_timer_queue, &relogioRTC, NULL);
+            ESP_LOGI(TAG_UART, "Read %d bytes: '%s'", rxBytes, data);
+            ESP_LOG_BUFFER_HEXDUMP(TAG_UART, data, rxBytes, ESP_LOG_INFO);
+        }
+    }
+    free(data);
+}
 // Main Task
 void app_main(void)
 {
+    // Set log level
+    esp_log_level_set(TAG, ESP_LOG_INFO);
     // ------- CHIP INFO -------- //
     // Set variables
     esp_chip_info_t chip_info;
     uint32_t flash_size;
     esp_chip_info(&chip_info);
-    esp_log_level_set("ESP_32", ESP_LOG_INFO);
     // Print LOG
     ESP_LOGI(TAG, "This is %s chip model %u with %d CPU core(s) WiFi%s%s%s, ",
              CONFIG_IDF_TARGET, chip_info.model, chip_info.cores,
@@ -404,7 +476,8 @@ void app_main(void)
     xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
     // ------- Timer -------- //
     // Creating TIMER Queue and task
-    adc_timer_queue = xQueueCreate(10, sizeof(adc_type)); // ADC queue
+    uart_timer_queue = xQueueCreate(10, sizeof(adc_type)); // ADC queue
+    adc_timer_queue = xQueueCreate(10, sizeof(adc_type));  // ADC queue
     Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
     if (!Timer_evt_queue)
     {
@@ -416,8 +489,9 @@ void app_main(void)
     // ------- PWM -------- //
     xTaskCreate(pwm_task, "pwm_task", 2048, NULL, 10, NULL);
     // ------- ADC -------- //
-   
     xTaskCreate(ADC_task, "ADC_task", 2048, NULL, 10, NULL);
+    // ------- ADC -------- //
+    xTaskCreate(uart_task, "uart_task", 2048, NULL, configMAX_PRIORITIES, NULL);
     // ------- Block loop -------- //
     int i = 0;
     while (1)
