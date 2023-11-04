@@ -476,7 +476,7 @@ void app_main(void)
     xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
     // ------- Timer -------- //
     // Creating TIMER Queue and task
-    uart_timer_queue = xQueueCreate(10, sizeof(adc_type)); // ADC queue
+    uart_timer_queue = xQueueCreate(10, sizeof(uint32_t)); // UART queue
     adc_timer_queue = xQueueCreate(10, sizeof(adc_type));  // ADC queue
     Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
     if (!Timer_evt_queue)
@@ -490,7 +490,7 @@ void app_main(void)
     xTaskCreate(pwm_task, "pwm_task", 2048, NULL, 10, NULL);
     // ------- ADC -------- //
     xTaskCreate(ADC_task, "ADC_task", 2048, NULL, 10, NULL);
-    // ------- ADC -------- //
+    // ------- UART -------- //
     xTaskCreate(uart_task, "uart_task", 2048, NULL, configMAX_PRIORITIES, NULL);
     // ------- Block loop -------- //
     int i = 0;
