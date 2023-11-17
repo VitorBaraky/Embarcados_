@@ -28,7 +28,8 @@ static const char *TAG_GPIO = "GPIO";
 static const char *TAG_TIMER = "TIMER";
 static const char *TAG_PWM = "PWM";
 static const char *TAG_ADC = "ADC";
-static const char *TAG_UART = "UART";
+static const char *RX_TASK_TAG  = "RX_UART";
+static const char *TX_TASK_TAG  = "TX_UART";
 //  ----------------------------------------  Defining global variables and struct ---------------------------- //
 //  Inputs
 #define GPIO_INPUT_IO_0 21
@@ -218,6 +219,7 @@ static void timer_task(void *arg)
 {
     // Set log Level
     esp_log_level_set(TAG_TIMER, ESP_LOG_INFO);
+    esp_log_level_set(TX_TASK_TAG, ESP_LOG_INFO);
     // Timer configuration
     queue_element_t timer_element;
     adc_type adc1;
@@ -280,6 +282,7 @@ static void timer_task(void *arg)
                     relogioRTC.hora = 0;
                     relogioRTC.minuto = 0;
                     relogioRTC.segundo = 0;
+                    sendData(TX_TASK_TAG, "OK meu chapa");
                 }
             }
             // Update semaphor state
@@ -405,7 +408,7 @@ static void ADC_task(void *arg)
 static void uart_task(void *arg)
 {
     // Set log level
-    esp_log_level_set(TAG_UART, ESP_LOG_INFO);
+    esp_log_level_set(RX_TASK_TAG, ESP_LOG_INFO);
     horario relogioRTC;
     const uart_config_t uart_config = {
         .baud_rate = 115200,
@@ -419,7 +422,6 @@ static void uart_task(void *arg)
     uart_param_config(UART_NUM_1, &uart_config);
     uart_set_pin(UART_NUM_1, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     // RX data receive loop
-    static const char *TAG_UART = "RX_UART";
     uint8_t *data = (uint8_t *)malloc(RX_BUF_SIZE + 1);
     while (1)
     {
@@ -431,8 +433,8 @@ static void uart_task(void *arg)
             relogioRTC.minuto = (data[2] - '0') * 10 + (data[3] - '0');
             relogioRTC.segundo = (data[4] - '0') * 10 + (data[5] - '0');
             xQueueSendToBack(uart_timer_queue, &relogioRTC, NULL);
-            ESP_LOGI(TAG_UART, "Read %d bytes: '%s'", rxBytes, data);
-            ESP_LOG_BUFFER_HEXDUMP(TAG_UART, data, rxBytes, ESP_LOG_INFO);
+            ESP_LOGI(RX_TASK_TAG, "Read %d bytes: '%s'", rxBytes, data);
+            ESP_LOG_BUFFER_HEXDUMP(RX_TASK_TAG, data, rxBytes, ESP_LOG_INFO);
         }
     }
     free(data);
