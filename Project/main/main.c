@@ -2,6 +2,18 @@
 // Group : Vitor Baraky and Victor Hugo
 // ---------------------------------------- Library -------------------------------------------- //
 #include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include "esp_wifi.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "protocol_examples_common.h"
+#include "lwip/sockets.h"
+#include "lwip/dns.h"
+#include "lwip/netdb.h"
+#include "mqtt_client.h"
 #include <inttypes.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
@@ -22,14 +34,21 @@
 #include "soc/soc_caps.h"
 #include "driver/uart.h"
 #include "string.h"
+#include "lvgl.h"
+#include "esp_lvgl_port.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "driver/i2c.h"
+#include "esp_lcd_panel_vendor.h"
 // ----------------------------------------  Defining Global TAGs -------------------------------------------- //
 static const char *TAG = "ESP_32";
 static const char *TAG_GPIO = "GPIO";
 static const char *TAG_TIMER = "TIMER";
 static const char *TAG_PWM = "PWM";
 static const char *TAG_ADC = "ADC";
-static const char *RX_TASK_TAG  = "RX_UART";
-static const char *TX_TASK_TAG  = "TX_UART";
+static const char *RX_TASK_TAG = "RX_UART";
+static const char *TX_TASK_TAG = "TX_UART";
+static const char *TAG_DISPLAY = "DISPLAY";
 //  ----------------------------------------  Defining global variables and struct ---------------------------- //
 //  Inputs
 #define GPIO_INPUT_IO_0 21
@@ -80,6 +99,20 @@ typedef struct
 static const int RX_BUF_SIZE = 1024;
 #define TXD_PIN (GPIO_NUM_5)
 #define RXD_PIN (GPIO_NUM_4)
+// DISPLAY global defines
+#define EXAMPLE_LCD_PIXEL_CLOCK_HZ (400 * 1000)
+#define EXAMPLE_PIN_NUM_SDA 19
+#define EXAMPLE_PIN_NUM_SCL 18
+#define EXAMPLE_PIN_NUM_RST -1
+#define EXAMPLE_I2C_HW_ADDR 0x3C
+// Display resolution
+#define EXAMPLE_LCD_H_RES 128
+#define EXAMPLE_LCD_V_RES 64
+// Bit number used to represent command and parameter
+#define EXAMPLE_LCD_CMD_BITS 8
+#define EXAMPLE_LCD_PARAM_BITS 8
+// i2c host
+#define I2C_HOST 0
 // ---------------------------------------- Starting SEMAPHOREs -------------------------------------------- //
 static SemaphoreHandle_t semaphore_pwm = NULL;
 static SemaphoreHandle_t semaphore_ADC = NULL;
@@ -94,6 +127,10 @@ static QueueHandle_t gpio_pwm_queue = NULL;
 static QueueHandle_t adc_timer_queue = NULL;
 // Starting UART-TIMER Queue
 static QueueHandle_t uart_timer_queue = NULL;
+// Starting DISPLAY-TIMER Queue
+static QueueHandle_t display_timer_queue = NULL;
+// Starting DISPLAY-ADC Queue
+static QueueHandle_t display_adc_queue = NULL;
 // ----------------------------------------  Interruptions -------------------------------------------- //
 // GPIO interruption
 static void IRAM_ATTR gpio_isr_handler(void *arg)
@@ -124,6 +161,15 @@ int sendData(const char *logName, const char *data)
     const int txBytes = uart_write_bytes(UART_NUM_1, data, len);
     ESP_LOGI(logName, "Wrote %d bytes", txBytes);
     return txBytes;
+}
+/* The LVGL port component calls esp_lcd_panel_draw_bitmap API for send data to the screen. There must be called
+lvgl_port_flush_ready(disp) after each transaction to display. The best way is to use on_color_trans_done
+callback from esp_lcd IO config structure. In IDF 5.1 and higher, it is solved inside LVGL port component. */
+static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
+{
+    lv_disp_t *disp = (lv_disp_t *)user_ctx;
+    lvgl_port_flush_ready(disp);
+    return false;
 }
 // ----------------------------------------  TASKS -------------------------------------------- //
 // GPIO task //
@@ -269,6 +315,7 @@ static void timer_task(void *arg)
                 }
                 conta = 0;
                 ESP_LOGI(TAG_TIMER, "Timer stopped, count=%llu , a_count=%llu, hora= %u, minuto= %u, segundo= %u", timer_element.event_count, timer_element.a_count, relogio.hora, relogio.minuto, relogio.segundo);
+                xQueueSendToBack(display_timer_queue, &relogio, NULL);
                 while (xQueueReceive(adc_timer_queue, &adc1, 10 / (portTICK_PERIOD_MS)))
                 {
                     ESP_LOGI(TAG_ADC, "ADC read --> Raw = %lu | Voltage = %lu ", adc1.raw, adc1.voltage);
@@ -402,6 +449,7 @@ static void ADC_task(void *arg)
         adc_oneshot_read(adc1_handle, ADC1_CHAN0, &adc1.raw);
         adc_cali_raw_to_voltage(adc1_cali_handle, adc1.raw, &adc1.voltage);
         xQueueSendToBack(adc_timer_queue, &adc1, NULL);
+        xQueueSendToBack(display_adc_queue, &adc1, NULL);
     }
 }
 // UART task
@@ -438,6 +486,98 @@ static void uart_task(void *arg)
         }
     }
     free(data);
+}
+// I2C DISPLAY task
+static void display_task(void *arg)
+{
+    adc_type adc1;
+    horario relogio;
+    esp_log_level_set(TAG_DISPLAY, ESP_LOG_INFO);
+    i2c_config_t i2c_conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = EXAMPLE_PIN_NUM_SDA,
+        .scl_io_num = EXAMPLE_PIN_NUM_SCL,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = EXAMPLE_LCD_PIXEL_CLOCK_HZ,
+    };
+    ESP_ERROR_CHECK(i2c_param_config(I2C_HOST, &i2c_conf));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_HOST, I2C_MODE_MASTER, 0, 0, 0));
+
+    ESP_LOGI(TAG, "Install panel IO");
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+    esp_lcd_panel_io_i2c_config_t io_config = {
+        .dev_addr = EXAMPLE_I2C_HW_ADDR,
+        .control_phase_bytes = 1,               // According to SSD1306 datasheet
+        .lcd_cmd_bits = EXAMPLE_LCD_CMD_BITS,   // According to SSD1306 datasheet
+        .lcd_param_bits = EXAMPLE_LCD_CMD_BITS, // According to SSD1306 datasheet
+        .dc_bit_offset = 6,                     // According to SSD1306 datasheet
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_HOST, &io_config, &io_handle));
+
+    ESP_LOGI(TAG, "Install SSD1306 panel driver");
+    esp_lcd_panel_handle_t panel_handle = NULL;
+    esp_lcd_panel_dev_config_t panel_config = {
+        .bits_per_pixel = 1,
+        .reset_gpio_num = EXAMPLE_PIN_NUM_RST,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(io_handle, &panel_config, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+
+    ESP_LOGI(TAG, "Initialize LVGL");
+    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_init(&lvgl_cfg);
+
+    const lvgl_port_display_cfg_t disp_cfg = {
+        .io_handle = io_handle,
+        .panel_handle = panel_handle,
+        .buffer_size = EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES,
+        .double_buffer = true,
+        .hres = EXAMPLE_LCD_H_RES,
+        .vres = EXAMPLE_LCD_V_RES,
+        .monochrome = true,
+        .rotation = {
+            .swap_xy = false,
+            .mirror_x = false,
+            .mirror_y = false,
+        }};
+    lv_disp_t *disp = lvgl_port_add_disp(&disp_cfg);
+    /* Register done callback for IO */
+    const esp_lcd_panel_io_callbacks_t cbs = {
+        .on_color_trans_done = notify_lvgl_flush_ready,
+    };
+    esp_lcd_panel_io_register_event_callbacks(io_handle, &cbs, disp);
+    /* Rotation of the screen */
+    lv_disp_set_rotation(disp, LV_DISP_ROT_NONE);
+    lv_obj_t *scr = lv_disp_get_scr_act(disp);
+    lv_obj_t *label_relogio = lv_label_create(scr);
+    lv_obj_t *label_adc = lv_label_create(scr);
+    for (;;)
+    {
+        if (xQueueReceive(display_adc_queue, &adc1, 100 / (portTICK_PERIOD_MS)))
+        {
+            ESP_LOGI(TAG_DISPLAY, "tensao adc display %lu",adc1.voltage);
+            char *adc_string;
+            asprintf(&adc_string, "%lu mV", adc1.voltage);
+            puts(adc_string);
+            lv_label_set_text(label_adc, adc_string);
+            lv_obj_align(label_adc, LV_ALIGN_LEFT_MID, 0, 0);
+            free(adc_string);
+            if (xQueueReceive(display_timer_queue, &relogio, 10 / (portTICK_PERIOD_MS)))
+            {
+                ESP_LOGI(TAG_DISPLAY, "hora display %u : %u : %u",relogio.hora, relogio.minuto, relogio.segundo);
+                char *relogio_string;
+                asprintf(&relogio_string, "%u : %u : %u", relogio.hora, relogio.minuto, relogio.segundo);
+                puts(relogio_string);
+                lv_label_set_text(label_relogio, relogio_string);
+                // lv_obj_set_width(label_relogio, disp->driver->hor_res);
+                lv_obj_align(label_relogio, LV_ALIGN_RIGHT_MID, 0, 0);
+                free(relogio_string);
+            }
+        }
+    }
 }
 // Main Task
 void app_main(void)
@@ -478,22 +618,20 @@ void app_main(void)
     xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
     // ------- Timer -------- //
     // Creating TIMER Queue and task
-    uart_timer_queue = xQueueCreate(10, sizeof(uint32_t)); // UART queue
-    adc_timer_queue = xQueueCreate(10, sizeof(adc_type));  // ADC queue
+    uart_timer_queue = xQueueCreate(10, sizeof(uint32_t));    // UART queue
+    adc_timer_queue = xQueueCreate(10, sizeof(adc_type));     // ADC queue
+    display_timer_queue = xQueueCreate(10, sizeof(adc_type)); // DISPLAY-TIMER queue
+    display_adc_queue = xQueueCreate(10, sizeof(adc_type));   // DISPLAY-ADC queue
     Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
-    if (!Timer_evt_queue)
-    {
-        ESP_LOGE(TAG_TIMER, "Creating queue failed");
-        return;
-    }
-    ESP_LOGI(TAG_TIMER, "Create timer handle");
-    xTaskCreate(timer_task, "Timer_task", 2048, NULL, 10, NULL);
+    xTaskCreate(timer_task, "Timer_task", 4096, NULL, 10, NULL);
     // ------- PWM -------- //
     xTaskCreate(pwm_task, "pwm_task", 2048, NULL, 10, NULL);
     // ------- ADC -------- //
-    xTaskCreate(ADC_task, "ADC_task", 2048, NULL, 10, NULL);
+    xTaskCreate(ADC_task, "ADC_task", 4096, NULL, 10, NULL);
     // ------- UART -------- //
     xTaskCreate(uart_task, "uart_task", 2048, NULL, configMAX_PRIORITIES, NULL);
+    // ------- DISPLAY -------- //
+    xTaskCreate(display_task, "display_task", 4096, NULL, 10, NULL);
     // ------- Block loop -------- //
     int i = 0;
     while (1)
