@@ -93,7 +93,7 @@ typedef struct
 typedef struct
 {
     int data;          
-    char topic;
+    char topic[20];
 } mqtt_info;
 // PWM Global defines
 #define LEDC_TIMER LEDC_TIMER_0
@@ -419,6 +419,7 @@ static void pwm_task(void *arg)
     {
         if (xQueueReceive(MQTT_PWM_queue, &mqtt, 100/ (portTICK_PERIOD_MS))){
             if ((strcmp(mqtt.topic,"/topic/red"))==0){
+                printf("Entrou no Vermelho -- Duty = %d",new_duty);
                 new_duty=(pow(2, 13) - 1) * mqtt.data/ 100;
                 ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_2,new_duty));
                 // Update duty to apply the new value
@@ -426,6 +427,7 @@ static void pwm_task(void *arg)
             }
              if ((strcmp(mqtt.topic,"/topic/blue"))==0){
                 new_duty=(pow(2, 13) - 1) * mqtt.data/ 100;
+                 printf("Entrou no Azul -- Duty = %d",new_duty);
                 ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_3,new_duty));
                 // Update duty to apply the new value
                 ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_3));
@@ -542,7 +544,7 @@ static void display_task(void *arg)
 {
     adc_type adc1;
     horario relogio;
-    esp_log_level_set(TAG_DISPLAY, ESP_LOG_INFO);
+    esp_log_level_set(TAG_DISPLAY, ESP_LOG_NONE);
     i2c_config_t i2c_conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = EXAMPLE_PIN_NUM_SDA,
@@ -622,7 +624,6 @@ static void display_task(void *arg)
                 asprintf(&relogio_string, "%u : %u : %u", relogio.hora, relogio.minuto, relogio.segundo);
                 puts(relogio_string);
                 lv_label_set_text(label_relogio, relogio_string);
-                // lv_obj_set_width(label_relogio, disp->driver->hor_res);
                 lv_obj_align(label_relogio, LV_ALIGN_RIGHT_MID, 0, 0);
                 free(relogio_string);
             }
@@ -652,8 +653,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_SUBSCRIBED, msg_red_id=%d", event->msg_id);
-        //msg_id = esp_mqtt_client_publish(client, "/topic/red", "data", 0, 0, 0);
-        //ESP_LOGI(TAG_MQTT, "sent publish successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_UNSUBSCRIBED:
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -665,9 +664,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_DATA");
         printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
         printf("DATA=%.*s\r\n", event->data_len, event->data);
-        mqtt.data= (int)atoi(event->data);
-        //sscanf(event->data, "%d", &mqtt.data);
-        mqtt.topic = (event->topic);
+        memset(mqtt.topic,0,sizeof(mqtt.topic));
+        mqtt.data=0;
+        sscanf(event->data, "%d", &mqtt.data);
+        memcpy(mqtt.topic, event->topic,event->topic_len);
+        printf("topic -- size %d convertido =%s \r\n",event->topic_len, mqtt.topic);
+        printf("data -- convertido =%d \r\n",mqtt.data);
         xQueueSendToBack(MQTT_PWM_queue,&mqtt, NULL);
         break;
     case MQTT_EVENT_ERROR:
