@@ -22,5 +22,8 @@ Grupo : Vitor Baraky e Victor Hugo
   - main_task (Task principal).
 
     Nesta task foram feitas as configurações e inicializações das tasks e queues utilizadas no trabalho.
-    
+
+
+Para o tratamento do botão apertado no teclado foi adicionada uma lógica utilizando uma variável global chamada 'trava', na qual será setada para nivel lógico alto quando o primeiro dado capturado pelo conversor A/D for tratado, sendo zerada após o primeiro tratamento. Essa lógica foi adicionada para evitar que o mesmo botão apertado seja tratado múltiplas vezes. 
+
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
