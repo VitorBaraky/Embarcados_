@@ -23,3 +23,4 @@ Grupo : Vitor Baraky e Victor Hugo
 
     Nesta task foram feitas as configurações e inicializações das tasks e queues utilizadas no trabalho.
     
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
