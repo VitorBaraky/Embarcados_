@@ -5,6 +5,7 @@ Grupo : Vitor Baraky e Victor Hugo
 - **Materiais utilizados:**
     - ESP_32;
     - Teclado Analógico  de 12 botões.
+      
  ![c6b27833-8f6f-402b-b679-0985246a88f6](https://github.com/VitorBaraky/Embarcados_/assets/57228428/50b0776a-a2ce-47ac-a5cb-64a0956678ae)
       
 - **Tasks utilizadas:**
