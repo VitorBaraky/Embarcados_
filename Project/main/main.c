@@ -51,35 +51,19 @@ static const char *RX_TASK_TAG = "RX_UART";
 static const char *TX_TASK_TAG = "TX_UART";
 static const char *TAG_DISPLAY = "DISPLAY";
 static const char *TAG_MQTT = "MQTT";
-//  ----------------------------------------  Defining global variables and struct ---------------------------- //
-//  Inputs
-#define GPIO_INPUT_IO_0 21
-#define GPIO_INPUT_IO_1 22
-#define GPIO_INPUT_IO_2 23
-#define GPIO_INPUT_PIN_SEL ((1ULL << GPIO_INPUT_IO_0) | (1ULL << GPIO_INPUT_IO_1) | (1ULL << GPIO_INPUT_IO_2))
-// Outputs
-#define GPIO_OUTPUT_IO_0 2
-#define GPIO_OUTPUT_IO_0_26 26
-#define GPIO_OUTPUT_IO_0_17 17
-#define GPIO_OUTPUT_PIN_SEL ((1ULL << GPIO_OUTPUT_IO_0))
-#define ESP_INTR_FLAG_DEFAULT 0
-// LED STATE variable
-uint32_t led_state = 0; // variable responsable to register the LED state
-// Defining event count struct
+//  ----------------------------------------  Defining global variables and structs---------------------------- //
+// Defining structs
 typedef struct
 {
     uint64_t event_count;
     uint64_t a_count;
 } queue_element_t;
-int conta = 0;
-// Defining real time clock struct
 typedef struct
 {
     uint8_t segundo;
     uint8_t minuto;
     uint8_t hora;
 } horario;
-horario relogio;
 typedef struct
 {
     bool mode;           // Validate pwm mode (Automatic or Manual)
@@ -95,6 +79,21 @@ typedef struct
     int data;          
     char topic[20];
 } mqtt_info;
+// Initializing global variables
+horario relogio;
+uint32_t led_state = 0;
+int conta = 0;
+//  Inputs
+#define GPIO_INPUT_IO_0 21
+#define GPIO_INPUT_IO_1 22
+#define GPIO_INPUT_IO_2 23
+#define GPIO_INPUT_PIN_SEL ((1ULL << GPIO_INPUT_IO_0) | (1ULL << GPIO_INPUT_IO_1) | (1ULL << GPIO_INPUT_IO_2))
+// Outputs
+#define GPIO_OUTPUT_IO_0 2
+#define GPIO_OUTPUT_IO_0_26 26
+#define GPIO_OUTPUT_IO_0_17 17
+#define GPIO_OUTPUT_PIN_SEL ((1ULL << GPIO_OUTPUT_IO_0))
+#define ESP_INTR_FLAG_DEFAULT 0
 // PWM Global defines
 #define LEDC_TIMER LEDC_TIMER_0
 #define LEDC_MODE LEDC_LOW_SPEED_MODE
@@ -279,12 +278,13 @@ static void gpio_task(void *arg)
 static void timer_task(void *arg)
 {
     // Set log Level
-    esp_log_level_set(TAG_TIMER, ESP_LOG_INFO);
-    esp_log_level_set(TX_TASK_TAG, ESP_LOG_INFO);
-    // Timer configuration
+    esp_log_level_set(TAG_TIMER, ESP_LOG_NONE);
+    esp_log_level_set(TX_TASK_TAG, ESP_LOG_NONE);
+    // Initializing local variables
     queue_element_t timer_element;
     adc_type adc1;
     horario relogioRTC;
+       // Timer configuration
     gptimer_handle_t gptimer = NULL;
     gptimer_config_t timer_config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
@@ -357,11 +357,12 @@ static void timer_task(void *arg)
         }
     }
 }
-// PWM task
+// PWM task //
 static void pwm_task(void *arg)
 {
     // Set log level
     esp_log_level_set(TAG_PWM, ESP_LOG_NONE);
+    // Initializing local variables
     pwm_modes button_pwm;
     int new_duty = 0;
     int duty_local = 0;
@@ -410,6 +411,7 @@ static void pwm_task(void *arg)
         .gpio_num = 17,
         .duty = 0, // Set duty to 0%
         .hpoint = 0};
+    // Register in memory
     ESP_ERROR_CHECK(ledc_channel_config(&PWM_0_channel));
     ESP_ERROR_CHECK(ledc_channel_config(&PWM_1_channel));
     ESP_ERROR_CHECK(ledc_channel_config(&PWM_2_channel));
@@ -417,6 +419,7 @@ static void pwm_task(void *arg)
     // PWM modes
     for (;;)
     {
+        // Channel 2 and Channel 3 -- MQTT control
         if (xQueueReceive(MQTT_PWM_queue, &mqtt, 100/ (portTICK_PERIOD_MS))){
             if ((strcmp(mqtt.topic,"/topic/red"))==0){
                 printf("Entrou no Vermelho -- Duty = %d",new_duty);
@@ -433,7 +436,7 @@ static void pwm_task(void *arg)
                 ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_3));
             }
         }
-        // manual
+        // manual mode -- channel 0 and channel 1
         if (xQueueReceive(gpio_pwm_queue, &button_pwm, 100 /(portTICK_PERIOD_MS)))
         {
             if (button_pwm.mode == 1)
@@ -448,7 +451,7 @@ static void pwm_task(void *arg)
                 // Update duty to apply the new value
                 ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_1));
             }
-            // Automatic
+            // Automatic mode -- channel 0 and channel 1
             if (button_pwm.mode == 0)
             {
                 ESP_LOGI(TAG_PWM, "Automatic mode");
@@ -467,11 +470,12 @@ static void pwm_task(void *arg)
         }
     }
 }
-// ADC Task
+// ADC Task //
 static void ADC_task(void *arg)
 {
     // Set Log level
     esp_log_level_set(TAG_ADC, ESP_LOG_NONE);
+    // Initializing local variable
     adc_type adc1;
     //-------------ADC1 Init---------------//
     adc_oneshot_unit_handle_t adc1_handle;
@@ -504,12 +508,14 @@ static void ADC_task(void *arg)
         xQueueSendToBack(display_adc_queue, &adc1, NULL);
     }
 }
-// UART task
+// UART task //
 static void uart_task(void *arg)
 {
     // Set log level
     esp_log_level_set(RX_TASK_TAG, ESP_LOG_INFO);
+    // Initializing local variable
     horario relogioRTC;
+    // Configure UART 
     const uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -518,6 +524,7 @@ static void uart_task(void *arg)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
+    // Installing UART
     uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(UART_NUM_1, &uart_config);
     uart_set_pin(UART_NUM_1, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
@@ -542,9 +549,12 @@ static void uart_task(void *arg)
 // I2C DISPLAY task
 static void display_task(void *arg)
 {
+    // Set log level
+    esp_log_level_set(TAG_DISPLAY, ESP_LOG_NONE);
+    // Initializing local varaibles
     adc_type adc1;
     horario relogio;
-    esp_log_level_set(TAG_DISPLAY, ESP_LOG_NONE);
+    // Configure I2c
     i2c_config_t i2c_conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = EXAMPLE_PIN_NUM_SDA,
@@ -555,7 +565,7 @@ static void display_task(void *arg)
     };
     ESP_ERROR_CHECK(i2c_param_config(I2C_HOST, &i2c_conf));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_HOST, I2C_MODE_MASTER, 0, 0, 0));
-
+    // Installing panel
     ESP_LOGI(TAG, "Install panel IO");
     esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_i2c_config_t io_config = {
@@ -566,22 +576,21 @@ static void display_task(void *arg)
         .dc_bit_offset = 6,                     // According to SSD1306 datasheet
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_HOST, &io_config, &io_handle));
-
+    // Installing driver
     ESP_LOGI(TAG, "Install SSD1306 panel driver");
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_dev_config_t panel_config = {
         .bits_per_pixel = 1,
         .reset_gpio_num = EXAMPLE_PIN_NUM_RST,
     };
+    // Register in memory
     ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(io_handle, &panel_config, &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-
     ESP_LOGI(TAG, "Initialize LVGL");
     const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     lvgl_port_init(&lvgl_cfg);
-
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = io_handle,
         .panel_handle = panel_handle,
@@ -608,6 +617,7 @@ static void display_task(void *arg)
     lv_obj_t *label_adc = lv_label_create(scr);
     char *adc_string;
     char *relogio_string;
+    // Display refresh loop 
     for (;;)
     {
         if (xQueueReceive(display_adc_queue, &adc1, 100 / (portTICK_PERIOD_MS)))
@@ -630,14 +640,15 @@ static void display_task(void *arg)
         }
     }
 }
-// MQQT event handler task
+// MQQT event handler 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
+    // Set log level
     esp_log_level_set(TAG_MQTT, ESP_LOG_INFO);
-    // uint8_t data_int;
     ESP_LOGD(TAG_MQTT, "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
     esp_mqtt_event_handle_t event = event_data;
     esp_mqtt_client_handle_t client = event->client;
+    // Initializing local variables
     int msg_id;
     mqtt_info mqtt;
     switch ((esp_mqtt_event_id_t)event_id)
@@ -664,8 +675,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG_MQTT, "MQTT_EVENT_DATA");
         printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
         printf("DATA=%.*s\r\n", event->data_len, event->data);
+        // Cleaning variables
         memset(mqtt.topic,0,sizeof(mqtt.topic));
         mqtt.data=0;
+        // Converting string -- int
         sscanf(event->data, "%d", &mqtt.data);
         memcpy(mqtt.topic, event->topic,event->topic_len);
         printf("topic -- size %d convertido =%s \r\n",event->topic_len, mqtt.topic);
@@ -716,22 +729,20 @@ void app_main(void)
              (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
     ESP_LOGI(TAG, "Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
-
-    // ------- GPIO -------- //
-    // Creating queue
+    // Creating queues semaphores and tasks
     MQTT_PWM_queue = xQueueCreate(10, sizeof(mqtt_info));
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
     gpio_pwm_queue = xQueueCreate(10, sizeof(pwm_modes));
     semaphore_pwm = xSemaphoreCreateBinary();
     semaphore_ADC = xSemaphoreCreateBinary();
+    // ------- GPIO -------- //
     xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 10, NULL);
-    // ------- Timer -------- //
-    // Creating TIMER Queue and task
     uart_timer_queue = xQueueCreate(10, sizeof(uint32_t));    // UART queue
     adc_timer_queue = xQueueCreate(10, sizeof(adc_type));     // ADC queue
     display_timer_queue = xQueueCreate(10, sizeof(adc_type)); // DISPLAY-TIMER queue
     display_adc_queue = xQueueCreate(10, sizeof(adc_type));   // DISPLAY-ADC queue
     Timer_evt_queue = xQueueCreate(10, sizeof(queue_element_t));
+    // ------- TIMER -------- //
     xTaskCreate(timer_task, "Timer_task", 4096, NULL, 10, NULL);
     // ------- PWM -------- //
     xTaskCreate(pwm_task, "pwm_task", 4096, NULL, 10, NULL);
